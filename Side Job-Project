@@ -1,0 +1,125 @@
+import numpy as np 
+import pandas as pd 
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import mean_absolute_error, accuracy_score
+import os
+from itertools import combinations
+import pickle
+
+# Idea that I am working on right now.. since we want the minimum cost to fields needed to correctly ID the correct category. You start with a given column
+# say that it is BirdTypeId, so you are starting at cost of 8. You say that you have a threshold for accuracy that you need, say 99%. So you'll then have a decision tree
+# that says, ok if BirdTypeId is a given field, then to acheive 99% accuracy, you'll also need to request OwnerId, to acheive the lowest cost while acheiving accuracy level.
+# You would map this out ahead of time, and then implement, checking accuracy of your decision tree occasionally.  
+#
+# If the quesiton is, what is the cheapest combo of features, I've tested and seen that you can acheive around 98% accuracy on this dataset using just SpeciesId
+# with a cost of only 4. Because I found it curious that SpeciesId could correctly identify the CategoryId, if you sort the data by SpeciesId, you'll see
+# that there are only 16 cases out of the 1371 who's SpeciesId doesn't correctly identify the CategoryId. 
+#
+# I'm going to build a decisioning module that will take in which features were provded, and then tell you whether you need additioinal features or if you could remove 
+# certain features as they add no value. 
+#
+# Running note. When you run this whole notebook, you'll see a table at the bottom showing the sets of features that provide the models enough
+# information (those above the threshold of 98% accuracy) to make an accurate prediction and those that will need to request more info to be able to make
+# an accurate decision (those below the threshold of 98% accuracy).
+
+
+X_full = pd.read_csv("/content/Example Data.csv")
+
+given_costs = {'BirdTypeId': 8, 'OwnerId': 16, 'PetStoreId': 1, 'SupplierId': 2, 'SpeciesId': 4}
+
+
+
+features = ['CategoryId', 'BirdTypeId', 'OwnerId', 'PetStoreId', 'SupplierId', 'SpeciesId']
+for x in X_full:
+    if x not in features:
+        X_full.drop(x, axis=1, inplace=True) # Making sure no columns are included that we don't want.
+features.remove('CategoryId')
+
+y = X_full.CategoryId
+X_full.drop(['CategoryId'], axis=1, inplace=True) # Seperating the output variable from the input variables.
+
+
+
+#print(X_train_full.head())
+#print(X_valid_full.head())
+
+def cost_func(cost_dict, vals): # Function used to calculate cost of a given set of features
+  cost = 0
+  for x in vals:
+    if cost_dict[x]:
+      cost += cost_dict[x]
+  return cost
+
+
+threshold = .98 # Sets accuracy level threshold
+numTrials = 10 # number of trials run in the inner loop.. honestly probably unnecessary right now, given that the data stratifies between <65% accuracy and >98% accuracy. 
+results = []
+
+for i in range(1, len(features) + 1): 
+  for x in combinations(features, i):
+    
+    X_full_loop = X_full.copy()
+    for z in X_full_loop:
+      if z not in x:
+        X_full_loop.drop(z, axis=1, inplace=True) # dropping the columns not included in this combination
+
+    RFaccuracy_sum = 0 # accumulators for calculating average accuracy for the current combination
+    XGBaccuracy_sum = 0
+
+    for k in range(numTrials):
+      X_train_full, X_valid_full, y_train, y_valid = train_test_split(X_full_loop, y, train_size = 0.80, test_size = 0.20) # randomly splits the data into 80% train and 20% test
+      
+      RFmodel = RandomForestClassifier(criterion = 'entropy', n_estimators=50, max_depth=5, random_state=33, bootstrap=False, min_samples_leaf=3)
+      RFmodel.fit(X_train_full, y_train)
+      preds = RFmodel.predict(X_valid_full)
+      
+      RFaccuracy_sum += accuracy_score(y_valid, preds)
+      
+      # XG Boost Classifier Model - https://towardsdatascience.com/https-medium-com-vishalmorde-xgboost-algorithm-long-she-may-rein-edd9f99be63d#:~:text=XGBoost%20is%20a%20decision%2Dtree,images%2C%20text%2C%20etc.)&text=A%20wide%20range%20of%20applications,and%20user%2Ddefined%20prediction%20problems.
+      XGB_model = XGBClassifier(n_estimators=50, learning_rate = 0.05)
+      XGB_model.fit(X_train_full, y_train)
+      preds = XGB_model.predict(X_valid_full)
+  
+      XGBaccuracy_sum += accuracy_score(y_valid, preds)
+    #
+    # file_name = ''
+    #for y in x:
+    #  file_name += y
+    #if RFaccuracy_sum/numTrials > XGBaccuracy_sum/numTrials:
+    #  model = RFmodel
+    #else: 
+    #  model = XGB_model
+    #pickle.dump(model, open(file_name +'.pickle.dat', "wb")) # In theory used to output the models into .dat files to be used outside of this book..
+    # but theres an issue with it, need to figure out.
+    results.append([cost_func(given_costs, x), x, round(RFaccuracy_sum/numTrials, 4), round(XGBaccuracy_sum/numTrials, 4)])
+
+prev_lowest_cost = 1000
+for x in results:
+  if x[0] < prev_lowest_cost and (x[2] > threshold or x[3]> threshold):
+    prev_lowest_cost = x[0]
+    best_feature_set = x[1]
+    best_RFaccuracy = x[2]
+    best_XGBaccuracy = x[3]
+
+print("Best combo set:" ,prev_lowest_cost, best_feature_set, best_RFaccuracy, best_XGBaccuracy)
+
+above_thresh = []
+below_thresh = [] # This will be the set of features, that if received, you will need to request an additional feature, at a cost, to 
+# achieve above threshold accuracy.
+
+
+for x in results:
+  if x[2] > threshold:
+    above_thresh.append(x)
+  else:
+    below_thresh.append(x)
+print(f"Those above {threshold}: " )
+for x in above_thresh:
+  print(x)
+print(f"Those below {threshold}")
+for x in below_thresh:
+  print(x)
+# Article describing how to export the trained models into .dat files to be used later. 
+# https://machinelearningmastery.com/save-gradient-boosting-models-xgboost-python/
